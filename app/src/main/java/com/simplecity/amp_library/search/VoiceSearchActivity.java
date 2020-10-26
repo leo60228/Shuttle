@@ -1,10 +1,12 @@
 package com.simplecity.amp_library.search;
 
+import android.annotation.SuppressLint;
 import android.app.SearchManager;
 import android.content.ComponentName;
 import android.content.Intent;
 import android.os.Bundle;
 import android.os.IBinder;
+import android.provider.MediaStore;
 import android.widget.Toast;
 import com.annimon.stream.Stream;
 import com.simplecity.amp_library.ShuttleApplication;
@@ -12,11 +14,13 @@ import com.simplecity.amp_library.dagger.module.ActivityModule;
 import com.simplecity.amp_library.model.Album;
 import com.simplecity.amp_library.model.AlbumArtist;
 import com.simplecity.amp_library.playback.MediaManager;
+import com.simplecity.amp_library.playback.QueueManager;
 import com.simplecity.amp_library.ui.activities.BaseActivity;
 import com.simplecity.amp_library.ui.activities.MainActivity;
 import com.simplecity.amp_library.utils.ComparisonUtils;
 import com.simplecity.amp_library.utils.DataManager;
 import com.simplecity.amp_library.utils.LogUtils;
+import com.simplecity.amp_library.utils.SettingsManager;
 import io.reactivex.Observable;
 import io.reactivex.android.schedulers.AndroidSchedulers;
 import java.util.Collections;
@@ -53,9 +57,60 @@ public class VoiceSearchActivity extends BaseActivity {
     @Override
     public void onServiceConnected(ComponentName name, IBinder service) {
         super.onServiceConnected(name, service);
-        if (intent != null && intent.getAction() != null && intent.getAction().equals("android.media.action.MEDIA_PLAY_FROM_SEARCH")) {
-            searchAndPlaySongs();
+        if (intent != null && intent.getAction() != null && intent.getAction().equals(MediaStore.INTENT_ACTION_MEDIA_PLAY_FROM_SEARCH)) {
+            String mediaFocus = intent.getStringExtra(MediaStore.EXTRA_MEDIA_FOCUS);
+            if (mediaFocus != null && mediaFocus.compareTo(MediaStore.Audio.Playlists.ENTRY_CONTENT_TYPE) == 0) {
+                searchAndStartPlaylist();
+            } else {
+                searchAndPlaySongs();
+            }
         }
+    }
+
+    @SuppressLint("CheckResult")
+    private void searchAndStartPlaylist() {
+        String query;
+        if (intent.hasExtra("android.intent.extra.playlist")) {
+            query = intent.getStringExtra("android.intent.extra.playlist");
+        } else {
+            query = intent.getStringExtra(SearchManager.QUERY);
+        }
+        String finalQuery = query;
+        boolean shuffle;
+        if (intent.hasExtra("com.simplecity.amp_library.shuffle")) {
+            shuffle = Boolean.parseBoolean(intent.getStringExtra("com.simplecity.amp_library.shuffle"));
+        } else {
+            shuffle = SettingsManager.getInstance().getRememberShuffle() && mediaManager.getShuffleMode() == QueueManager.ShuffleMode.ON;
+        }
+        DataManager.getInstance().getPlaylistsRelay()
+                .first(Collections.emptyList())
+                .flatMapObservable(Observable::fromIterable)
+                .filter(playlist -> playlist.name.toLowerCase(Locale.getDefault()).contains(finalQuery.toLowerCase()))
+                .flatMap(playlist -> playlist.getSongsObservable())
+                .firstOrError()
+                .observeOn(AndroidSchedulers.mainThread())
+                .subscribe(songs -> {
+                    if (songs != null) {
+                        mediaManager.setShuffleMode(shuffle ? QueueManager.ShuffleMode.ON : QueueManager.ShuffleMode.OFF);
+                        if (shuffle) {
+                            mediaManager.shuffleAll(songs, message -> {
+                                Toast.makeText(this, message, Toast.LENGTH_SHORT).show();
+                                return Unit.INSTANCE;
+                            });
+                        } else {
+                            mediaManager.playAll(songs, position, true, message -> {
+                                Toast.makeText(this, message, Toast.LENGTH_SHORT).show();
+                                return Unit.INSTANCE;
+                            });
+                        }
+                        startActivity(new Intent(this, MainActivity.class));
+                    }
+                    finish();
+                }, error -> {
+                    LogUtils.logException(TAG, "Error attempting to playAll()", error);
+                    startActivity(new Intent(this, MainActivity.class));
+                    finish();
+                });
     }
 
     @Override
